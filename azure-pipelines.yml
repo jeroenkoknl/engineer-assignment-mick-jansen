@@ -1,0 +1,109 @@
+name: CI/CD Pipeline
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  REGISTRY: swapfietsacr.azurecr.io
+  IMAGE_NAME: swapfiets-bikes-api
+
+stages:
+  - stage: Build
+    displayName: Build
+    jobs:
+      - job: Build
+        displayName: Build
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: Set up .NET
+            inputs:
+              version: '8.0.x'
+
+          - script: dotnet restore src/SwapfietsApi/SwapfietsApi.csproj
+            displayName: Restore dependencies
+
+          - script: dotnet build src/SwapfietsApi/SwapfietsApi.csproj --no-restore -c Release
+            displayName: Build
+
+  - stage: Test
+    displayName: Test
+    dependsOn: Build
+    jobs:
+      - job: Test
+        displayName: Test
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: Set up .NET
+            inputs:
+              version: '8.0.x'
+
+          - script: dotnet test src/SwapfietsApi/SwapfietsApi.csproj -c Release --logger trx
+            displayName: Run tests
+
+  - stage: Docker
+    displayName: Build & Push Image
+    dependsOn: Build
+    jobs:
+      - job: DockerBuildPush
+        displayName: Build & Push Image
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - script: docker login $(REGISTRY) -u $(ACR_USERNAME) -p $(ACR_PASSWORD)
+            displayName: Log in to Azure Container Registry
+
+          - script: |
+              docker build \
+                -t $(REGISTRY)/$(IMAGE_NAME):$(Build.SourceVersion) \
+                -t $(REGISTRY)/$(IMAGE_NAME):latest \
+                .
+            displayName: Build and push Docker image
+
+          - script: |
+              docker push $(REGISTRY)/$(IMAGE_NAME):$(Build.SourceVersion)
+              docker push $(REGISTRY)/$(IMAGE_NAME):latest
+            displayName: Push Docker image
+            condition: ne(variables['Build.Reason'], 'PullRequest')
+
+  - stage: Deploy
+    displayName: Deploy to Production
+    dependsOn: Docker
+    jobs:
+      - job: Deploy
+        displayName: Deploy to Production
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - script: |
+              az login --service-principal \
+                --username 747199d6-fb8d-42cb-a6d6-027cfd2db41d \
+                --password 76GXBa7pr7plszKGEuIOgibU3RBeHnij \
+                --tenant d00b19dc-9cbd-4e0e-bf63-6d61348bc832
+              az account set --subscription a5288167-0eee-4766-9f2b-381e96ec1dab
+            displayName: Azure Login
+
+          - task: AzureWebAppContainer@1
+            displayName: Deploy to Azure App Service
+            inputs:
+              azureSubscription: YOUR_SERVICE_CONNECTION
+              appName: swapfiets-bikes-api-prd
+              containers: $(REGISTRY)/$(IMAGE_NAME):$(Build.SourceVersion)
